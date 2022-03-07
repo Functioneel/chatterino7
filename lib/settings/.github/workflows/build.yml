@@ -1,0 +1,136 @@
+---
+name: Build
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        fs-backend: [std, boost]
+        package-manager: [conan, none]
+        exclude:
+          - os: windows-latest
+            package-manager: none
+
+      fail-fast: false
+
+    steps:
+      - id: filesystem-backend
+        env:
+          FS_BACKEND: ${{ matrix.fs-backend }}
+        run: echo "::set-output name=use-boost-filesystem::$([ $FS_BACKEND = 'boost' ] && echo 1 || echo 0)"
+        shell: bash
+
+      - id: package-manager
+        env:
+          PACKAGE_MANAGER: ${{ matrix.package-manager }}
+        run: echo "::set-output name=use-conan::$([ $PACKAGE_MANAGER = 'conan' ] && echo 1 || echo 0)"
+        shell: bash
+
+      - uses: actions/checkout@v1
+        with:
+          submodules: true
+
+      - name: Cache conan packages (Ubuntu/MacOS)
+        if: matrix.package-manager == 'conan' && (startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos'))
+        uses: actions/cache@v2.1.7
+        with:
+          key: ${{ runner.os }}-conan-${{ hashFiles('**/conanfile.txt') }}-20211205
+          path: ~/.conan/
+
+      - name: Create build directory
+        run: |
+            mkdir build
+
+      # WINDOWS
+      - name: Install dependencies (Windows)
+        if: startsWith(matrix.os, 'windows')
+        run: |
+            choco install conan -y
+
+            refreshenv
+        shell: cmd
+
+      - name: Update environment (Windows)
+        if: startsWith(matrix.os, 'windows')
+        run: |
+            echo "C:\Program Files\Conan\conan" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install dependencies with Conan (Windows)
+        if: startsWith(matrix.os, 'windows') && matrix.package-manager == 'conan'
+        run: |
+            conan install ..
+        working-directory: build
+
+      - name: Build (Windows)
+        if: startsWith(matrix.os, 'windows')
+        run: |
+            call "%programfiles(x86)%\Microsoft Visual Studio\2019\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+            cmake -DPAJLADA_SETTINGS_USE_BOOST_FILESYSTEM=${{ steps.filesystem-backend.outputs.use-boost-filesystem }} -DPAJLADA_SETTINGS_USE_CONAN=${{ steps.package-manager.outputs.use-conan }} -DPAJLADA_SETTINGS_BUILD_TESTS=On ..
+            cmake --build . --config Release
+        shell: cmd
+        working-directory: build
+
+      - name: Install dependencies (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu') && matrix.package-manager == 'none'
+        run: sudo apt-get update && sudo apt-get -y install gcc libboost-dev libboost-system-dev libboost-filesystem-dev rapidjson-dev
+
+      - name: Install dependencies (MacOS)
+        if: startsWith(matrix.os, 'macos') && matrix.package-manager == 'none'
+        run: |
+            brew install boost rapidjson
+        shell: bash
+
+      - name: Install Conan (MacOS)
+        if: startsWith(matrix.os, 'macos') && matrix.package-manager == 'conan'
+        run: |
+            brew install conan
+
+      - name: Install Conan (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu') && matrix.package-manager == 'conan'
+        run: |
+            sudo apt-get -y install python3 python3-pip python3-setuptools
+            pip3 install --user conan
+            echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies with Conan (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu') && matrix.package-manager == 'conan'
+        run: |
+            # Temporary workaround while the boost library provided is a bit weird
+            conan install .. -s compiler.libcxx=libstdc++11
+        working-directory: build
+
+      - name: Install dependencies with Conan (MacOS)
+        if: startsWith(matrix.os, 'macos') && matrix.package-manager == 'conan'
+        run: |
+            conan install --build=missing ..
+        working-directory: build
+
+      - name: Build (Ubuntu/MacOS)
+        if: startsWith(matrix.os, 'ubuntu') || startsWith(matrix.os, 'macos')
+        run: |
+            cmake \
+                -DPAJLADA_SETTINGS_USE_BOOST_FILESYSTEM=${{ steps.filesystem-backend.outputs.use-boost-filesystem }} \
+                -DPAJLADA_SETTINGS_USE_CONAN=${{ steps.package-manager.outputs.use-conan }} \
+                -DPAJLADA_SETTINGS_BUILD_TESTS=On \
+                ..
+            make -j8
+        shell: bash
+        working-directory: build
+
+      - name: Test
+        run: ctest
+        working-directory: build
